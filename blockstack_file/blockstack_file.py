@@ -26,6 +26,8 @@ import sys
 import tempfile
 import argparse
 import socket
+import json
+
 from ConfigParser import SafeConfigParser
 from .version import __version__
 
@@ -34,13 +36,23 @@ import blockstack_gpg
 
 APP_NAME = "files"
 MAX_EXPIRED_KEYS = 20
-CONFIG_DIR = os.path.expanduser("~/.blockstack-files")
-CONFIG_PATH = os.path.join( CONFIG_DIR, "blockstack-files.ini" )
+
+log = blockstack_client.get_logger()
+
+if os.environ.get("BLOCKSTACK_TEST", "") == "1":
+    # testing!
+    CONFIG_PATH = os.environ.get("BLOCKSTACK_FILE_CONFIG", None)
+    assert CONFIG_PATH is not None
+
+    CONFIG_DIR = os.path.dirname( CONFIG_PATH )
+
+else:
+    CONFIG_DIR = os.path.expanduser("~/.blockstack-files")
+    CONFIG_PATH = os.path.join( CONFIG_DIR, "blockstack-files.ini" )
 
 CONFIG_FIELDS = [
     'immutable_key',
     'key_id',
-    'key_dir',
     'blockchain_id',
     'hostname',
     'wallet'
@@ -52,12 +64,11 @@ def get_config( config_path=CONFIG_PATH ):
     """
    
     parser = SafeConfigParser()
-    parser.read( config_file )
+    parser.read( config_path )
 
     config_dir = os.path.dirname(config_path)
 
     immutable_key = False
-    key_dir = os.path.join(config_dir, 'keys')
     key_id = None
     blockchain_id = None
     hostname = socket.gethostname()
@@ -72,9 +83,6 @@ def get_config( config_path=CONFIG_PATH ):
             else:
                 immutable_key = False
 
-        if parser.has_option('blockstack-file', 'key_dir'):
-            key_dir = parser.get('blockstack-file', 'key_dir' )
-
         if parser.has_option('blockstack-file', 'file_id'):
             key_id = parser.get('blockstack-file', 'key_id' )
 
@@ -87,12 +95,8 @@ def get_config( config_path=CONFIG_PATH ):
         if parser.has_option('blockstack-file', 'wallet'):
             wallet = parser.get('blockstack-file', 'wallet')
         
-    if not os.path.exists(key_dir):
-        os.makedirs(key_dir, 0700 )
-
     config = {
         'immutable_key': immutable_key,
-        'key_dir': key_dir,
         'key_id': key_id,
         'blockchain_id': blockchain_id,
         'hostname': hostname,
@@ -106,32 +110,86 @@ def file_url_expired_keys( blockchain_id ):
     """
     Make a URL to the expired key list
     """
-    url = blockstack_client.make_mutable_data_url( blockchain_id, "%s-old" % APP_NAME )
-    return url 
+    url = blockstack_client.make_mutable_data_url( blockchain_id, "%s-old" % APP_NAME, None )
+    return url
 
 
-def file_key_lookup( blockchain_id, index, hostname, config_path=CONFIG_PATH ):
+def file_fq_data_name( data_name ):
+    """
+    Make a fully-qualified data name
+    """
+    return "%s:%s" % (APP_NAME, data_name)
+
+
+def file_is_fq_data_name( data_name ):
+    """
+    Is this a fully-qualified data name?
+    """
+    return data_name.startswith("%s:" % APP_NAME)
+
+
+def file_data_name( fq_data_name ):
+    """
+    Get the relative name of this data from its fully-qualified name
+    """
+    assert file_is_fq_data_name( fq_data_name )
+    return data_name[len("%s:" % APP_NAME):]
+
+
+def file_key_lookup( blockchain_id, index, hostname, key_id=None, config_path=CONFIG_PATH, wallet_keys=None ):
     """
     Get the file-encryption GPG key for the given blockchain ID, by index.
+
     if index == 0, then give back the current key
     if index > 0, then give back an older (revoked) key.
+    if key_id is given, index and hostname will be ignored
 
-    Return {'status': True, 'key_data': ..., 'key_id': key_id} on success
+    Return {'status': True, 'key_data': ..., 'key_id': key_id, OPTIONAL['stale_key_index': idx]} on success
     Return {'error': ...} on failure
     """
 
+    log.debug("lookup '%s' key for %s (index %s, key_id = %s)" % (hostname, blockchain_id, index, key_id))
     conf = get_config( config_path )
     config_dir = os.path.dirname(config_path)
     
-    immutable = conf['immutable']
-    key_id = conf.get('key_id', None)
-    key_dir = conf.get('key_dir', None)
+    immutable = conf['immutable_key']
 
-    if key_dir is None:
-        key_dir = os.path.join(config_dir, "keys")
+    if key_id is not None:
+        # we know exactly which key to get 
+        # try each current key 
+        hosts_listing = file_list_hosts( blockchain_id, wallet_keys=wallet_keys )
+        if 'error' in hosts_listing:
+            log.error("Failed to list hosts for %s: %s" % (blockchain_id, hosts_listing['error']))
+            return {'error': 'Failed to look up hosts'}
 
-    if index == 0:
-        file_key = blockstack_gpg.gpg_app_get_key( blockchain_id, APP_NAME, hostname, immutable=immutable, key_id=key_id, gpghome=key_dir, config_dir=config_dir )
+        hosts = hosts_listing['hosts']
+        for hostname in hosts:
+            file_key = blockstack_gpg.gpg_app_get_key( blockchain_id, APP_NAME, hostname, immutable=immutable, key_id=key_id, config_dir=config_dir )
+            if 'error' not in file_key:
+                if key_id == file_key['key_id']:
+                    # success!
+                    return file_key
+
+        # check previous keys...
+        url = file_url_expired_keys( blockchain_id )
+        old_key_bundle_res = blockstack_client.data_get( url )
+        if 'error' in old_key_bundle_res:
+            return old_key_bundle_res
+
+        old_key_list = old_key_bundle_res['data']['old_keys']
+        for i in xrange(0, len(old_key_list)):
+            old_key = old_key_list[i]
+            if old_key['key_id'] == key_id:
+                # success!
+                ret = {}
+                ret.update( old_key )
+                ret['stale_key_index'] = i+1 
+                return old_key
+
+        return {'error': 'No such key %s' % key_id}
+
+    elif index == 0:
+        file_key = blockstack_gpg.gpg_app_get_key( blockchain_id, APP_NAME, hostname, immutable=immutable, key_id=key_id, config_dir=config_dir )
         if 'error' in file_key:
             return file_key
 
@@ -140,20 +198,21 @@ def file_key_lookup( blockchain_id, index, hostname, config_path=CONFIG_PATH ):
     else:
         # get the bundle of revoked keys
         url = file_url_expired_keys( blockchain_id )
-        old_key_bundle_res = blockstack_client.get_data( url )
+        old_key_bundle_res = blockstack_client.data_get( url )
         if 'error' in old_key_bundle_res:
             return old_key_bundle_res
 
-        old_key_list = old_key_bundle_res['data']
-        if index >= len(old_key_list):
+        old_key_list = old_key_bundle_res['data']['old_keys']
+        if index >= len(old_key_list)+1:
             return {'error': 'Index out of bounds: %s' % index}
 
-        return old_key_list[index]
+        return old_key_list[index-1]
 
 
 def file_key_retire( blockchain_id, file_key, config_path=CONFIG_PATH, wallet_keys=None ):
     """
     Retire the given key.  Move it to the head of the old key bundle list
+    @file_key should be data returned by file_key_lookup
     Return {'status': True} on success
     Return {'error': ...} on error
     """
@@ -161,20 +220,22 @@ def file_key_retire( blockchain_id, file_key, config_path=CONFIG_PATH, wallet_ke
     config_dir = os.path.dirname(config_path)
     url = file_url_expired_keys( blockchain_id )
         
-    old_key_bundle_res = blockstack_client.get_data( url, wallet_keys=wallet_keys )
+    old_key_bundle_res = blockstack_client.data_get( url, wallet_keys=wallet_keys )
     if 'error' in old_key_bundle_res:
-        log.error('Failed to get old key bundle: %s' % old_key_bundle_res['error'])
-        return {'error': 'Failed to get old key bundle'}
+        log.warn('Failed to get old key bundle: %s' % old_key_bundle_res['error'])
+        old_key_list = []
 
-    if file_key in old_key_bundle_res:
-        # already present 
-        log.warning("Key %s is already retired" % file_key['key_id'])
-        return {'status': True}
+    else:
+        old_key_list = old_key_bundle_res['data']['old_keys']
+        for old_key in old_key_list:
+            if old_key['key_id'] == file_key['key_id']:
+                # already present 
+                log.warning("Key %s is already retired" % file_key['key_id'])
+                return {'status': True}
 
-    old_key_list = old_key_bundle_res['data']
     old_key_list.insert(0, file_key )
 
-    res = blockstack_client.put_data( url, old_key_list, wallet_keys=wallet_keys )
+    res = blockstack_client.data_put( url, {'old_keys': old_key_list}, wallet_keys=wallet_keys )
     if 'error' in res:
         log.error("Failed to append to expired key bundle: %s" % res['error'])
         return {'error': 'Failed to append to expired key list'}
@@ -201,7 +262,7 @@ def file_key_regenerate( blockchain_id, hostname, config_path=CONFIG_PATH, walle
             return {'error': 'Failed to retire key'}
 
     # make a new key 
-    res = gpg_app_create_key( blockchain_id, "files", hostname, wallet_keys=wallet_keys, config_dir=config_dir )
+    res = blockstack_gpg.gpg_app_create_key( blockchain_id, "files", hostname, wallet_keys=wallet_keys, config_dir=config_dir )
     if 'error' in res:
         log.error("Failed to generate new key: %s" % res['error'])
         return {'error': 'Failed to generate new key'}
@@ -209,28 +270,33 @@ def file_key_regenerate( blockchain_id, hostname, config_path=CONFIG_PATH, walle
     return {'status': True}
 
 
-def file_encrypt( blockchain_id, hostname, recipient_blockchain_id_and_hosts, input_path, output_path, passphrase=None, config_path=CONFIG_PATH ):
+def file_encrypt( blockchain_id, hostname, recipient_blockchain_id_and_hosts, input_path, output_path, passphrase=None, config_path=CONFIG_PATH, wallet_keys=None ):
     """
     Encrypt a file for a set of recipients.
     @recipient_blockchain_id_and_hosts must contain a list of (blockchain_id, hostname)
-    Return {'status': True} on success, and write ciphertext to output_path
+    Return {'status': True, 'sender_key_id': ...} on success, and write ciphertext to output_path
     Return {'error': ...} on error
     """
     config_dir = os.path.dirname(config_path)
 
     # find our encryption key
-    key_info = file_key_lookup( blockchain_id, 0, hostname, config_path=config_path )
+    key_info = file_key_lookup( blockchain_id, 0, hostname, config_path=config_path, wallet_keys=wallet_keys )
     if 'error' in key_info:
         return {'error': 'Failed to lookup encryption key'}
 
     # find the encryption key IDs for the recipients 
     recipient_keys = []
     for (recipient_id, recipient_hostname) in recipient_blockchain_id_and_hosts:
-            recipient_info = file_key_lookup( recipient_id, 0, recipient_hostname, config_path=config_path )
-            if 'error' in recipient_info:
-                return {'error': "Failed to look up key for '%s'" % recipient_id}
+        if recipient_id == blockchain_id and recipient_hostname == hostname:
+            # already have it 
+            recipient_keys.append(key_info)
+            continue
 
-            recipient_keys.append(recipient_info)
+        recipient_info = file_key_lookup( recipient_id, 0, recipient_hostname, config_path=config_path, wallet_keys=wallet_keys )
+        if 'error' in recipient_info:
+            return {'error': "Failed to look up key for '%s'" % recipient_id}
+
+        recipient_keys.append(recipient_info)
 
     # encrypt
     res = None
@@ -241,24 +307,23 @@ def file_encrypt( blockchain_id, hostname, recipient_blockchain_id_and_hosts, in
         log.error("Failed to encrypt: %s" % res['error'])
         return {'error': 'Failed to encrypt'}
 
-    return {'status': True}
+    return {'status': True, 'sender_key_id': key_info['key_id']}
 
 
-def file_decrypt_from_sender( my_key_info, sender_blockchain_id, key_index, sender_hostname, input_path, output_path, config_path=CONFIG_PATH ):
+def file_decrypt_from_key_info( sender_key_info, blockchain_id, key_index, hostname, input_path, output_path, passphrase=None, config_path=CONFIG_PATH, wallet_keys=None ):
     """
-    Try to decrypt a key with one of the sender's keys.
-    Return True if we succeeded
-    Return False if we failed permanently
-    Return None if the key failed, and we should try the next one.
+    Try to decrypt data with one of the receiver's keys
+    Return {'status': True} if we succeeded
+    Return {'error': ..., 'status': False} if we failed permanently
+    Return {'error': ..., 'status': True} if the key failed, and we should try the next one.
     """
-
     config_dir = os.path.dirname(config_path)
 
     # find remote sender
-    sender_key_info = file_key_lookup( sender_blockchain_id, key_index, sender_hostname, config_path=config_path )
-    if 'error' in sender_key_info:
-        log.error("Failed to look up key: %s" % sender_key_info['error'])
-        return {'error': 'Failed to lookup sender key'}
+    my_key_info = file_key_lookup( blockchain_id, key_index, hostname, config_path=config_path, wallet_keys=wallet_keys )
+    if 'error' in my_key_info:
+        log.error("Failed to look up key: %s" % my_key_info['error'])
+        return {'status': True, 'error': 'Failed to lookup sender key'}
 
     # decrypt
     res = None 
@@ -267,78 +332,80 @@ def file_decrypt_from_sender( my_key_info, sender_blockchain_id, key_index, send
 
     if 'error' in res:
         if res['error'] == 'Failed to decrypt data':
-            log.warn("Key %s failed to decrypt" % sender_key_info['key_id'])
-            return None
+            log.warn("Key %s failed to decrypt" % my_key_info['key_id'])
+            return {'status': True, 'error': 'Failed to decrypt with key'}
 
         else:
             log.error("Failed to decrypt: %s" % res['error'])
-            return False
+            return {'status': False, 'error': 'GPG error (%s)' % res['error']}
 
-    return True
+    return {'status': True}
 
 
-
-def file_decrypt( blockchain_id, hostname, sender_blockchain_id, input_path, output_path, passphrase=None, config_path=CONFIG_PATH ):
+def file_decrypt( blockchain_id, hostname, sender_blockchain_id, sender_key_id, input_path, output_path, passphrase=None, config_path=CONFIG_PATH, wallet_keys=None ):
     """
     Decrypt a file from a sender's blockchain ID.
-    Try the current key, and then the revoked keys
+    Try our current key, and then the old keys
     (but warn if there are revoked keys)
     Return {'status': True} on success, and write plaintext to output_path
     Return {'error': ...} on failure
     """
     config_dir = os.path.dirname(config_path)
-
-    # find our key 
-    key_info = file_key_lookup( blockchain_id, 0, hostname, config_path=config_path )
-    if 'error' in key_info:
-        log.error("Failed to look up key: %s" % key_info['error'])
-        return {'error': 'Failed to lookup key'}
-    
-    # check current keys (use each host)
-    sender_hosts_info = file_list_hosts( sender_blockchain_id, wallet_keys=wallet_keys)
-    if 'error' in sender_hosts_info:
-        log.error("Failed to look up hosts: %s" % sender_hosts['error'])
-        return {'error': 'Failed to look up sender hosts'}
-
-    # try current hosts 
-    hosts = sender_hosts_info['hosts']
     decrypted = False
     old_key = False
+    old_key_index = 0
+    sender_old_key_index = 0
 
-    for hostname in hosts:
-        rc = file_decrypt_with_key( key_info, sender_blockchain_id, 0, hostname, config_path=config_path )
-        if rc is None:
-            # try again
-            continue
-        elif not rc:
-            # failed 
-            return {'error': 'Failed to lookup sender key'}
+    # get the sender key 
+    sender_key_info = file_key_lookup( sender_blockchain_id, None, None, key_id=sender_key_id, config_path=config_path, wallet_keys=wallet_keys ) 
+    if 'error' in sender_key_info:
+        log.error("Failed to look up sender key: %s" % sender_key_info['error'])
+        return {'error': 'Failed to lookup sender key'}
+
+    if 'stale_key_index' in sender_key_info.keys():
+        old_key = True
+        sender_old_key_index = sender_key_info['sender_key_index']
+
+    # try each of our keys
+    # current key...
+    key_info = file_key_lookup( blockchain_id, 0, hostname, config_path=config_path, wallet_keys=wallet_keys )
+    if 'error' not in key_info:
+        res = file_decrypt_from_key_info( sender_key_info, blockchain_id, 0, hostname, input_path, output_path, passphrase=passphrase, config_path=config_path, wallet_keys=wallet_keys )
+        if 'error' in res:
+            if not res['status']:
+                # permanent failure 
+                log.error("Failed to decrypt: %s" % res['error'])
+                return {'error': 'Failed to decrypt'}
+
         else:
-            # success!
             decrypted = True
-            break
+
+    else:
+        # did not look up key 
+        log.error("Failed to lookup key: %s" % key_info['error'])
 
     if not decrypted:
-        # try old keys
-        old_key = True
-        for i in xrange(0, MAX_EXPIRED_KEYS):
-            rc = file_decrypt_with_key( key_info, sender_blockchain_id, i, key_info['keyName'], input_path, output_path, config_path=config_path )
-            if rc is None:
-                # try again 
-                continue
-            elif not rc:
-                # failed
-                return {'error': 'Failed to lookup sender key'}
+        # try old keys 
+        for i in xrange(1, MAX_EXPIRED_KEYS):
+            res = file_decrypt_from_key_info( sender_key_info, blockchain_id, i, hostname, input_path, output_path, passphrase=passphrase, config_path=config_path, wallet_keys=wallet_keys )
+            if 'error' in res:
+                # key is not online, but don't try again 
+                log.error("Failed to decrypt: %s" % res['error'])
+                return {'error': 'Failed to decrypt'}
             else:
-                # succeeded!
                 decrypted = True
+                old_key = True
+                old_key_index = i
                 break
 
     if decrypted:
+        log.debug("Decrypted with %s.%s" % (blockchain_id, hostname))
+
         ret = {'status': True}
         if old_key:
             ret['warning'] = "Used stale key"
-            ret['stale_key_index'] = i
+            ret['stale_key_index'] = old_key_index
+            ret['stale_sender_key_index'] = sender_old_key_index
 
         return ret
 
@@ -389,7 +456,7 @@ def file_put( blockchain_id, hostname, recipient_blockchain_ids, data_name, inpu
     if hostname in my_hosts:
         my_hosts.remove(hostname)
 
-    all_recipients += [(blockchain_id, host) for host in my_hosts]
+    all_recipients += [(blockchain_id, host) for host in my_hosts['hosts']]
 
     # make available to all hosts for each recipient 
     for recipient_blockchain_id in recipient_blockchain_ids:
@@ -399,10 +466,10 @@ def file_put( blockchain_id, hostname, recipient_blockchain_ids, data_name, inpu
             os.unlink(output_path)
             return {'error': 'Failed to look up recipient keys'}
 
-        all_recipients += [(recipient_blockchain_id, host) for host in their_hosts]
+        all_recipients += [(recipient_blockchain_id, host) for host in their_hosts['hosts']]
 
     # encrypt
-    res = file_encrypt( blockchain_id, hostname, all_recipients, input_path, output_path, passphrase=passphrase, config_path=config_path )
+    res = file_encrypt( blockchain_id, hostname, all_recipients, input_path, output_path, passphrase=passphrase, config_path=config_path, wallet_keys=wallet_keys )
     if 'error' in res:
         log.error("Failed to encrypt: %s" % res['error'])
         os.unlink(output_path)
@@ -412,8 +479,11 @@ def file_put( blockchain_id, hostname, recipient_blockchain_ids, data_name, inpu
     with open(output_path, "r") as f:
         ciphertext = f.read()
 
+    message = {'ciphertext': ciphertext, 'sender_key_id': res['sender_key_id']}
+
     # put to mutable storage 
-    res = blockstack_client.data_put( blockstack_client.make_mutable_data_url( blockchain_id, data_name ), {'ciphertext': ciphertext}, wallet_keys=wallet_keys )
+    fq_data_name = file_fq_data_name( data_name ) 
+    res = blockstack_client.data_put( blockstack_client.make_mutable_data_url( blockchain_id, fq_data_name, None ), message, wallet_keys=wallet_keys )
     if 'error' in res:
         log.error("Failed to put data: %s" % res['error'])
         os.unlink(output_path)
@@ -432,43 +502,72 @@ def file_get( blockchain_id, hostname, sender_blockchain_id, data_name, output_p
     """
   
     # get the ciphertext
-    res = blockstack_client.data_get( blockstack_client.make_mutable_data_url( sender_blockchain_id, data_name ), wallet_keys=wallet_keys )
+    fq_data_name = file_fq_data_name( data_name ) 
+    res = blockstack_client.data_get( blockstack_client.make_mutable_data_url( sender_blockchain_id, fq_data_name, None ), wallet_keys=wallet_keys )
     if 'error' in res:
-        log.error("Failed to get ciphertext: %s" % res['error'])
+        log.error("Failed to get ciphertext for %s: %s" % (fq_data_name, res['error']))
         return {'error': 'Failed to get encrypted file'}
 
     # stash
     fd, path = tempfile.mkstemp( prefix="blockstack-file-" )
     f = os.fdopen(fd, "w")
-    f.write( data['ciphertext'] )
+    f.write( res['data']['ciphertext'] )
     f.flush()
     os.fsync(f.fileno())
     f.close()
 
+    sender_key_id = res['data']['sender_key_id']
+
     # decrypt it
-    res = file_decrypt( blockchain_id, hostname, sender_blockchain_id, path, output_path, passphrase=passphrase, config_path=config_path )
+    res = file_decrypt( blockchain_id, hostname, sender_blockchain_id, sender_key_id, path, output_path, passphrase=passphrase, config_path=config_path, wallet_keys=wallet_keys )
     os.unlink( path )
     if 'error' in res:
         log.error("Failed to decrypt: %s" % res['error'])
         return {'error': 'Failed to decrypt data'}
 
-    # success!
-    return {'status': True}
+    else:
+        # success!
+        return res
 
 
-def file_delete( blockchain_id, hostname, data_name, config_path=CONFIG_PATH, wallet_keys=None ):
+def file_delete( blockchain_id, data_name, config_path=CONFIG_PATH, wallet_keys=None ):
     """
     Remove a file
     Return {'status': True} on success
     Return {'error': error} on failure
     """
 
-    res = blockstack_client.data_delete( blockstack_client.make_mutable_data_url( blockchain_id, data_name ), wallet_keys=wallet_keys )
+    fq_data_name = file_fq_data_name( data_name ) 
+    res = blockstack_client.data_delete( blockstack_client.make_mutable_data_url( blockchain_id, fq_data_name, None ), wallet_keys=wallet_keys )
     if 'error' in res:
         log.error("Failed to delete: %s" % res['error'])
         return {'error': 'Failed to delete'}
 
     return {'status': True}
+
+
+def file_list( blockchain_id, config_path=CONFIG_PATH, wallet_keys=None ):
+    """
+    List all files uploaded to a particular blockchain ID
+    Return {'status': True, 'listing': list} on success
+    Return {'error': ...} on error
+    """
+
+    res = blockstack_client.data_list( blockchain_id, wallet_keys=wallet_keys )
+    if 'error' in res:
+        log.error("Failed to list data: %s" % res['error'])
+        return {'error': 'Failed to list data'}
+
+    listing = []
+
+    # find the ones that this app put there 
+    for rec in res['listing']:
+        if not file_is_fq_data_name( rec['data_id'] ):
+            continue
+        
+        listing.append( rec )
+
+    return {'status': True, 'listing': listing}
 
 
 def main():
@@ -568,10 +667,19 @@ def main():
         hostname = conf['hostname']
     
     # load wallet 
-    wallet = blockstack_client.dump_wallet()
-    if 'error' in wallet:
-        print >> sys.stderr, json.dumps(wallet, sort_keys=True, indent=4)
-        sys.exit(1)
+    if config['wallet'] is not None and os.path.exists( config['wallet'] ):
+        # load from disk 
+        wallet = blockstack_client.load_wallet( config_dir=config_dir, wallet_path=config['wallet'], include_private=True )
+        if 'error' in wallet:
+            print >> sys.stderr, json.dumps(wallet, sort_keys=True, indent=4 )
+            sys.exit(1)
+
+    else:
+        # load from RPC
+        wallet = blockstack_client.dump_wallet()
+        if 'error' in wallet:
+            print >> sys.stderr, json.dumps(wallet, sort_keys=True, indent=4)
+            sys.exit(1)
 
     if args.action == 'get':
         # get a file
@@ -613,7 +721,7 @@ def main():
 
     elif args.action == 'delete':
         # delete a file
-        res = file_delete( blockchain_id, hostname, data_name, config_path=CONFIG_PATH, wallet_keys=wallet )
+        res = file_delete( blockchain_id, data_name, config_path=CONFIG_PATH, wallet_keys=wallet )
         if 'error' in res:
             print >> sys.stderr, json.dumps(res, sort_keys=True, indent=4 )
             sys.exit(1)
