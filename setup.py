@@ -18,6 +18,7 @@ setup(
     download_url='https://github.com/blockstack/gitsec/archive/master.zip',
     zip_safe=False,
     include_package_data=True,
+    scripts=['bin/blockstack-file'],
     install_requires=[
         'blockstack-client>=0.0.13',
         'blockstack-gpg>=0.0.1.0'
