@@ -153,6 +153,7 @@ def file_key_lookup( blockchain_id, index, hostname, key_id=None, config_path=CO
     conf = get_config( config_path )
     config_dir = os.path.dirname(config_path)
     
+    proxy = blockstack_client.get_default_proxy( config_path=config_path )
     immutable = conf['immutable_key']
 
     if key_id is not None:
@@ -173,7 +174,7 @@ def file_key_lookup( blockchain_id, index, hostname, key_id=None, config_path=CO
 
         # check previous keys...
         url = file_url_expired_keys( blockchain_id )
-        old_key_bundle_res = blockstack_client.data_get( url )
+        old_key_bundle_res = blockstack_client.data_get( url, wallet_keys=wallet_keys, proxy=proxy )
         if 'error' in old_key_bundle_res:
             return old_key_bundle_res
 
@@ -199,7 +200,7 @@ def file_key_lookup( blockchain_id, index, hostname, key_id=None, config_path=CO
     else:
         # get the bundle of revoked keys
         url = file_url_expired_keys( blockchain_id )
-        old_key_bundle_res = blockstack_client.data_get( url )
+        old_key_bundle_res = blockstack_client.data_get( url, wallet_keys=wallet_keys, proxy=proxy )
         if 'error' in old_key_bundle_res:
             return old_key_bundle_res
 
@@ -220,8 +221,9 @@ def file_key_retire( blockchain_id, file_key, config_path=CONFIG_PATH, wallet_ke
 
     config_dir = os.path.dirname(config_path)
     url = file_url_expired_keys( blockchain_id )
+    proxy = blockstack_client.get_default_proxy( config_path=config_path )
         
-    old_key_bundle_res = blockstack_client.data_get( url, wallet_keys=wallet_keys )
+    old_key_bundle_res = blockstack_client.data_get( url, wallet_keys=wallet_keys, proxy=proxy )
     if 'error' in old_key_bundle_res:
         log.warn('Failed to get old key bundle: %s' % old_key_bundle_res['error'])
         old_key_list = []
@@ -236,7 +238,7 @@ def file_key_retire( blockchain_id, file_key, config_path=CONFIG_PATH, wallet_ke
 
     old_key_list.insert(0, file_key )
 
-    res = blockstack_client.data_put( url, {'old_keys': old_key_list}, wallet_keys=wallet_keys )
+    res = blockstack_client.data_put( url, {'old_keys': old_key_list}, wallet_keys=wallet_keys, proxy=proxy )
     if 'error' in res:
         log.error("Failed to append to expired key bundle: %s" % res['error'])
         return {'error': 'Failed to append to expired key list'}
