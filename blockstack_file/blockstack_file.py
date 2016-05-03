@@ -158,7 +158,7 @@ def file_key_lookup( blockchain_id, index, hostname, key_id=None, config_path=CO
     if key_id is not None:
         # we know exactly which key to get 
         # try each current key 
-        hosts_listing = file_list_hosts( blockchain_id, wallet_keys=wallet_keys )
+        hosts_listing = file_list_hosts( blockchain_id, wallet_keys=wallet_keys, config_path=config_path )
         if 'error' in hosts_listing:
             log.error("Failed to list hosts for %s: %s" % (blockchain_id, hosts_listing['error']))
             return {'error': 'Failed to look up hosts'}
@@ -414,14 +414,15 @@ def file_decrypt( blockchain_id, hostname, sender_blockchain_id, sender_key_id, 
         return {'error': 'No keys could decrypt'}
 
 
-def file_list_hosts( blockchain_id, wallet_keys=None ):
+def file_list_hosts( blockchain_id, wallet_keys=None, config_path=CONFIG_PATH ):
     """
     Given a blockchain ID, find out the hosts the blockchain ID owner has registered keys for.
     Return {'status': True, 'hosts': hostnames} on success
     Return {'error': ...} on failure
     """
+    config_dir = os.path.dirname(config_path)
     try:
-        ret = blockstack_gpg.gpg_list_app_keys( blockchain_id, APP_NAME, wallet_keys=wallet_keys )
+        ret = blockstack_gpg.gpg_list_app_keys( blockchain_id, APP_NAME, wallet_keys=wallet_keys, config_dir=config_dir )
     except Exception, e:
         ret = {'error': traceback.format_exc(e)}
 
@@ -449,10 +450,13 @@ def file_put( blockchain_id, hostname, recipient_blockchain_ids, data_name, inpu
     os.fchmod( fd, 0600 )
     os.close(fd)
 
+    config_dir = os.path.dirname(config_path)
+    client_config_path = os.path.join(config_dir, blockstack_client.CONFIG_FILENAME )
+
     all_recipients = []
     
     # make available to all other hosts for this blockchain_id
-    my_hosts = file_list_hosts( blockchain_id, wallet_keys=wallet_keys )
+    my_hosts = file_list_hosts( blockchain_id, wallet_keys=wallet_keys, config_path=config_path )
     if 'error' in my_hosts:
         log.error("Failed to list hosts: %s" % my_hosts['error'])
         os.unlink(output_path)
@@ -465,7 +469,7 @@ def file_put( blockchain_id, hostname, recipient_blockchain_ids, data_name, inpu
 
     # make available to all hosts for each recipient 
     for recipient_blockchain_id in recipient_blockchain_ids:
-        their_hosts = file_list_hosts( recipient_blockchain_id, wallet_keys=wallet_keys )
+        their_hosts = file_list_hosts( recipient_blockchain_id, wallet_keys=wallet_keys, config_path=config_path )
         if 'error' in their_hosts:
             log.error("Failed to list hosts for %s: %s" % (recipient_blockchain_id, their_hosts['error']))
             os.unlink(output_path)
@@ -488,7 +492,9 @@ def file_put( blockchain_id, hostname, recipient_blockchain_ids, data_name, inpu
 
     # put to mutable storage 
     fq_data_name = file_fq_data_name( data_name ) 
-    res = blockstack_client.data_put( blockstack_client.make_mutable_data_url( blockchain_id, fq_data_name, None ), message, wallet_keys=wallet_keys )
+    proxy = blockstack_client.get_default_proxy( config_path=client_config_path )
+
+    res = blockstack_client.data_put( blockstack_client.make_mutable_data_url( blockchain_id, fq_data_name, None ), message, wallet_keys=wallet_keys, proxy=proxy )
     if 'error' in res:
         log.error("Failed to put data: %s" % res['error'])
         os.unlink(output_path)
@@ -506,9 +512,13 @@ def file_get( blockchain_id, hostname, sender_blockchain_id, data_name, output_p
     Return {'error': error} on failure
     """
   
+    config_dir = os.path.dirname(config_path)
+    client_config_path = os.path.join(config_dir, blockstack_client.CONFIG_FILENAME )
+    proxy = blockstack_client.get_default_proxy( config_path=client_config_path )
+
     # get the ciphertext
     fq_data_name = file_fq_data_name( data_name ) 
-    res = blockstack_client.data_get( blockstack_client.make_mutable_data_url( sender_blockchain_id, fq_data_name, None ), wallet_keys=wallet_keys )
+    res = blockstack_client.data_get( blockstack_client.make_mutable_data_url( sender_blockchain_id, fq_data_name, None ), wallet_keys=wallet_keys, proxy=proxy )
     if 'error' in res:
         log.error("Failed to get ciphertext for %s: %s" % (fq_data_name, res['error']))
         return {'error': 'Failed to get encrypted file'}
@@ -542,8 +552,12 @@ def file_delete( blockchain_id, data_name, config_path=CONFIG_PATH, wallet_keys=
     Return {'error': error} on failure
     """
 
+    config_dir = os.path.dirname(config_path)
+    client_config_path = os.path.join(config_dir, blockstack_client.CONFIG_FILENAME )
+    proxy = blockstack_client.get_default_proxy( config_path=client_config_path )
+
     fq_data_name = file_fq_data_name( data_name ) 
-    res = blockstack_client.data_delete( blockstack_client.make_mutable_data_url( blockchain_id, fq_data_name, None ), wallet_keys=wallet_keys )
+    res = blockstack_client.data_delete( blockstack_client.make_mutable_data_url( blockchain_id, fq_data_name, None ), proxy=proxy, wallet_keys=wallet_keys )
     if 'error' in res:
         log.error("Failed to delete: %s" % res['error'])
         return {'error': 'Failed to delete'}
@@ -782,7 +796,7 @@ def main():
 
     elif args.action == 'delete':
         # delete a file
-        res = file_delete( blockchain_id, data_name, config_path=CONFIG_PATH, wallet_keys=wallet )
+        res = file_delete( blockchain_id, data_name, config_path=config_path, wallet_keys=wallet )
         if 'error' in res:
             print >> sys.stderr, json.dumps(res, sort_keys=True, indent=4 )
             sys.exit(1)
