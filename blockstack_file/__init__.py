@@ -21,4 +21,5 @@
     along with Blockstack-file. If not, see <http://www.gnu.org/licenses/>.
 """
 
-from blockstack_file import file_key_regenerate, file_put, file_get, file_delete, file_list, main
+from blockstack_file import file_key_regenerate, file_put, file_get, file_delete, file_list, file_sign, file_verify, main
+from blockstack_file import CONFIG_PATH

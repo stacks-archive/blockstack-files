@@ -15,7 +15,7 @@ setup(
     description='Blockstack encrypted file sharing',
     keywords='blockchain git crypography name key value store data',
     packages=find_packages(),
-    download_url='https://github.com/blockstack/gitsec/archive/master.zip',
+    download_url='https://github.com/blockstack/blockstack-file/archive/master.zip',
     zip_safe=False,
     include_package_data=True,
     scripts=['bin/blockstack-file'],

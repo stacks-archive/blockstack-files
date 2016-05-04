@@ -416,6 +416,60 @@ def file_decrypt( blockchain_id, hostname, sender_blockchain_id, sender_key_id, 
         return {'error': 'No keys could decrypt'}
 
 
+def file_sign( blockchain_id, hostname, input_path, passphrase=None, config_path=CONFIG_PATH, wallet_keys=None ):
+    """
+    Sign a file with the current blockchain ID's host's public key.
+    @config_path should be for the *client*, not blockstack-file
+    Return {'status': True, 'sender_key_id': ..., 'sig': ...} on success, and write ciphertext to output_path
+    Return {'error': ...} on error
+    """
+    config_dir = os.path.dirname(config_path)
+
+    # find our encryption key
+    key_info = file_key_lookup( blockchain_id, 0, hostname, config_path=config_path, wallet_keys=wallet_keys )
+    if 'error' in key_info:
+        return {'error': 'Failed to lookup encryption key'}
+
+    # sign
+    res = blockstack_gpg.gpg_sign( input_path, key_info, config_dir=config_dir )
+    if 'error' in res:
+        log.error("Failed to encrypt: %s" % res['error'])
+        return {'error': 'Failed to encrypt'}
+
+    return {'status': True, 'sender_key_id': key_info['key_id'], 'sig': res['sig']}
+
+
+def file_verify( sender_blockchain_id, sender_key_id, input_path, sig, config_path=CONFIG_PATH, wallet_keys=None ):
+    """
+    Verify that a file was signed with the given blockchain ID
+    @config_path should be for the *client*, not blockstack-file
+    Return {'status': True} on succes
+    Return {'error': ...} on error
+    """
+    config_dir = os.path.dirname(config_path)
+    old_key = False
+    old_key_index = 0
+    sender_old_key_index = 0
+
+    # get the sender key 
+    sender_key_info = file_key_lookup( sender_blockchain_id, None, None, key_id=sender_key_id, config_path=config_path, wallet_keys=wallet_keys ) 
+    if 'error' in sender_key_info:
+        log.error("Failed to look up sender key: %s" % sender_key_info['error'])
+        return {'error': 'Failed to lookup sender key'}
+
+    if 'stale_key_index' in sender_key_info.keys():
+        old_key = True
+        sender_old_key_index = sender_key_info['sender_key_index']
+
+    # attempt to verify 
+    res = blockstack_gpg.gpg_verify( input_path, sig, sender_key_info, config_dir=config_dir )
+    if 'error' in res:
+        log.error("Failed to verify from %s.%s" % (sender_blockchain_id, sender_key_id))
+        return {'error': 'Failed to verify'}
+
+    return {'status': True}
+
+
 def file_list_hosts( blockchain_id, wallet_keys=None, config_path=CONFIG_PATH ):
     """
     Given a blockchain ID, find out the hosts the blockchain ID owner has registered keys for.
@@ -574,7 +628,11 @@ def file_list( blockchain_id, config_path=CONFIG_PATH, wallet_keys=None ):
     Return {'error': ...} on error
     """
 
-    res = blockstack_client.data_list( blockchain_id, wallet_keys=wallet_keys )
+    config_dir = os.path.dirname(config_path)
+    client_config_path = os.path.join(config_dir, blockstack_client.CONFIG_FILENAME )
+    proxy = blockstack_client.get_default_proxy( config_path=client_config_path )
+
+    res = blockstack_client.data_list( blockchain_id, wallet_keys=wallet_keys, proxy=proxy )
     if 'error' in res:
         log.error("Failed to list data: %s" % res['error'])
         return {'error': 'Failed to list data'}
