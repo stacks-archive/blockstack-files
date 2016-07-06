@@ -43,7 +43,7 @@ log = blockstack_client.get_logger()
 if os.environ.get("BLOCKSTACK_TEST", "") == "1":
     # testing!
     CONFIG_PATH = os.environ.get("BLOCKSTACK_FILE_CONFIG", None)
-    assert CONFIG_PATH is not None
+    assert CONFIG_PATH is not None, "BLOCKSTACK_FILE_CONFIG must be defined"
 
     CONFIG_DIR = os.path.dirname( CONFIG_PATH )
 
