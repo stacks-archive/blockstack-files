@@ -21,7 +21,7 @@ setup(
     scripts=['bin/blockstack-file'],
     install_requires=[
         'blockstack-client>=0.0.13.0',
-        'blockstack-gpg>=0.0.1.0'
+        'blockstack-gpg>=0.0.13.0'
     ],
     classifiers=[
         'Intended Audience :: Developers',
